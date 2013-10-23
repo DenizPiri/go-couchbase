@@ -41,15 +41,21 @@ import (
 // Maximum number of times to retry a chunk of a bulk get on error.
 var MaxBulkRetries = 10
 
+// Maximum number of times to retry a Do() operation on error.
+var MaxRetries = 10
+
+// Returned from Do() if the number of retries has been exceeded.
+var ErrMaxRetries = errors.New("Exceeded max retries")
+
 // Execute a function on a memcached connection to the node owning key "k"
 //
 // Note that this automatically handles transient errors by replaying
 // your function on a "not-my-vbucket" error, so don't assume
 // your command will only be executed only once.
 func (b *Bucket) Do(k string, f func(mc *memcached.Client, vb uint16) error) error {
-	vb := b.VBHash(k)
-	for {
+	for attempts := 0; attempts < MaxRetries; attempts++ {
 		bucketInfo := b.getBucketInfo()
+		vb := vbHash(bucketInfo, k)
 
 		masterId := bucketInfo.VBucketServerMap.VBucketMap[vb][0]
 		conn, err := b.connections[masterId].Get()
@@ -65,13 +71,14 @@ func (b *Bucket) Do(k string, f func(mc *memcached.Client, vb uint16) error) err
 		case *gomemcached.MCResponse:
 			st := err.(*gomemcached.MCResponse).Status
 			atomic.AddUint64(&b.pool.client.Statuses[st], 1)
-			if st == gomemcached.NOT_MY_VBUCKET {
-				b.refresh()
-			} else {
+			if st != gomemcached.NOT_MY_VBUCKET {
 				return err
 			}
 		}
+
+		b.refresh()
 	}
+	return ErrMaxRetries
 }
 
 type gathered_stats struct {
@@ -258,10 +265,12 @@ func errorCollector(ech <-chan error, eout chan<- error) {
 }
 
 func (b *Bucket) GetBulk(keys []string) (map[string]*gomemcached.MCResponse, error) {
+	bucketInfo := b.getBucketInfo()
+
 	// Organize by vbucket
 	kdm := map[uint16][]string{}
 	for _, k := range keys {
-		vb := uint16(b.VBHash(k))
+		vb := uint16(vbHash(bucketInfo, k))
 		a, ok := kdm[vb]
 		if !ok {
 			a = []string{}

@@ -69,10 +69,10 @@ var crc32tab = []uint32{
 	0xb40bbe37, 0xc30c8ea1, 0x5a05df1b, 0x2d02ef8d}
 
 // Get the vbucket for the given key.
-func (b *Bucket) VBHash(key string) uint32 {
+func vbHash(bucketInfo bucketInfo, key string) uint32 {
 	crc := uint32(0xffffffff)
 	for x := 0; x < len(key); x++ {
 		crc = (crc >> 8) ^ crc32tab[(uint64(crc)^uint64(key[x]))&0xff]
 	}
-	return ((^crc) >> 16) & 0x7fff & (uint32(len(b.getBucketInfo().VBucketServerMap.VBucketMap)) - 1)
+	return ((^crc) >> 16) & 0x7fff & (uint32(len(bucketInfo.VBucketServerMap.VBucketMap)) - 1)
 }
