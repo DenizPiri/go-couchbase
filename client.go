@@ -49,7 +49,9 @@ var MaxBulkRetries = 10
 func (b *Bucket) Do(k string, f func(mc *memcached.Client, vb uint16) error) error {
 	vb := b.VBHash(k)
 	for {
-		masterId := b.VBucketServerMap.VBucketMap[vb][0]
+		bucketInfo := b.getBucketInfo()
+
+		masterId := bucketInfo.VBucketServerMap.VBucketMap[vb][0]
 		conn, err := b.connections[masterId].Get()
 		defer b.connections[masterId].Return(conn)
 		if err != nil {
@@ -60,8 +62,8 @@ func (b *Bucket) Do(k string, f func(mc *memcached.Client, vb uint16) error) err
 		switch err.(type) {
 		default:
 			return err
-		case gomemcached.MCResponse:
-			st := err.(gomemcached.MCResponse).Status
+		case *gomemcached.MCResponse:
+			st := err.(*gomemcached.MCResponse).Status
 			atomic.AddUint64(&b.pool.client.Statuses[st], 1)
 			if st == gomemcached.NOT_MY_VBUCKET {
 				b.refresh()
@@ -79,7 +81,8 @@ type gathered_stats struct {
 
 func getStatsParallel(b *Bucket, offset int, which string,
 	ch chan<- gathered_stats) {
-	sn := b.VBucketServerMap.ServerList[offset]
+	bucketInfo := b.getBucketInfo()
+	sn := bucketInfo.VBucketServerMap.ServerList[offset]
 
 	results := map[string]string{}
 	conn, err := b.connections[offset].Get()
@@ -102,19 +105,20 @@ func getStatsParallel(b *Bucket, offset int, which string,
 func (b *Bucket) GetStats(which string) map[string]map[string]string {
 	rv := map[string]map[string]string{}
 
-	if b.VBucketServerMap.ServerList == nil {
+	bucketInfo := b.getBucketInfo()
+	if bucketInfo.VBucketServerMap.ServerList == nil {
 		return rv
 	}
 	// Go grab all the things at once.
-	todo := len(b.VBucketServerMap.ServerList)
+	todo := len(bucketInfo.VBucketServerMap.ServerList)
 	ch := make(chan gathered_stats, todo)
 
-	for offset := range b.VBucketServerMap.ServerList {
+	for offset := range bucketInfo.VBucketServerMap.ServerList {
 		go getStatsParallel(b, offset, which, ch)
 	}
 
 	// Gather the results
-	for i := 0; i < len(b.VBucketServerMap.ServerList); i++ {
+	for i := 0; i < len(bucketInfo.VBucketServerMap.ServerList); i++ {
 		g := <-ch
 		if len(g.vals) > 0 {
 			rv[g.sn] = g.vals
@@ -142,7 +146,8 @@ func (b *Bucket) doBulkGet(vb uint16, keys []string,
 	attempts := 0
 	done := false
 	for attempts < MaxBulkRetries && !done {
-		masterId := b.VBucketServerMap.VBucketMap[vb][0]
+		bucketInfo := b.getBucketInfo()
+		masterId := bucketInfo.VBucketServerMap.VBucketMap[vb][0]
 		attempts++
 
 		// This stack frame exists to ensure we can clean up

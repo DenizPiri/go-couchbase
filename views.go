@@ -32,11 +32,12 @@ type ViewResult struct {
 }
 
 func (b *Bucket) randomBaseURL() (*url.URL, error) {
-	if len(b.Nodes) == 0 {
+	bucketInfo := b.getBucketInfo()
+	if len(bucketInfo.Nodes) == 0 {
 		return nil, errors.New("no couch rest URLs")
 	}
-	nodeNo := rand.Intn(len(b.Nodes))
-	node := b.Nodes[nodeNo]
+	nodeNo := rand.Intn(len(bucketInfo.Nodes))
+	node := bucketInfo.Nodes[nodeNo]
 	if node.CouchAPIBase == "" {
 		// Probably in "warmup" state
 		return nil, fmt.Errorf("Bucket is in %q state, not ready for view queries", node.Status)
@@ -44,7 +45,7 @@ func (b *Bucket) randomBaseURL() (*url.URL, error) {
 	u, err := ParseURL(node.CouchAPIBase)
 	if err != nil {
 		return nil, fmt.Errorf("Config error: Bucket %q node #%d CouchAPIBase=%q: %v",
-			b.Name, nodeNo, node.CouchAPIBase, err)
+			bucketInfo.Name, nodeNo, node.CouchAPIBase, err)
 	} else if b.pool != nil {
 		u.User = b.pool.client.BaseURL.User
 	}
@@ -67,6 +68,8 @@ func qParam(k, v string) string {
 // parameters.
 func (b *Bucket) ViewURL(ddoc, name string,
 	params map[string]interface{}) (string, error) {
+	bucketInfo := b.getBucketInfo()
+
 	u, err := b.randomBaseURL()
 	if err != nil {
 		return "", err
@@ -94,9 +97,9 @@ func (b *Bucket) ViewURL(ddoc, name string,
 	}
 
 	if ddoc == "" && name == "_all_docs" {
-		u.Path = fmt.Sprintf("/%s/_all_docs", b.Name)
+		u.Path = fmt.Sprintf("/%s/_all_docs", bucketInfo.Name)
 	} else {
-		u.Path = fmt.Sprintf("/%s/_design/%s/_view/%s", b.Name, ddoc, name)
+		u.Path = fmt.Sprintf("/%s/_design/%s/_view/%s", bucketInfo.Name, ddoc, name)
 	}
 	u.RawQuery = values.Encode()
 
@@ -118,7 +121,7 @@ func (b *Bucket) ViewCustom(ddoc, name string, params map[string]interface{},
 	if err != nil {
 		return err
 	}
-	maybeAddAuth(req, b.authHandler())
+	maybeAddAuth(req, b.authHandler)
 
 	res, err := HttpClient.Do(req)
 	if err != nil {

@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // The HTTP Client To Use
@@ -65,7 +66,7 @@ type Node struct {
 
 // A pool of nodes and buckets.
 type Pool struct {
-	BucketMap map[string]Bucket
+	BucketMap map[string]*Bucket
 	Nodes     []Node
 
 	BucketURL map[string]string `json:"buckets"`
@@ -73,8 +74,7 @@ type Pool struct {
 	client Client
 }
 
-// An individual bucket.  Herein lives the most useful stuff.
-type Bucket struct {
+type bucketInfo struct {
 	AuthType            string             `json:"authType"`
 	Capabilities        []string           `json:"bucketCapabilities"`
 	CapabilitiesVersion string             `json:"bucketCapabilitiesVer"`
@@ -100,34 +100,33 @@ type Bucket struct {
 	} `json:"vBucketServerMap"`
 	BasicStats  map[string]interface{} `json:"basicStats,omitempty"`
 	Controllers map[string]interface{} `json:"controllers,omitempty"`
+}
+
+// An individual bucket.  Herein lives the most useful stuff.
+type Bucket struct {
+	bucketInfo      bucketInfo // Protected by bucketInfoMutex.
+	bucketInfoMutex sync.RWMutex
 
 	pool        *Pool
 	connections []*connectionPool
 	commonSufix string
-}
-
-func (b Bucket) authHandler() (ah AuthHandler) {
-	if b.pool != nil {
-		ah = b.pool.client.ah
-	}
-	if ah == nil {
-		ah = &basicAuth{b.Name, ""}
-	}
-	return
+	authHandler AuthHandler // Read-only and go-routine safe.
 }
 
 // Get the (sorted) list of memcached node addresses (hostname:port).
-func (b Bucket) NodeAddresses() []string {
-	rv := make([]string, len(b.VBucketServerMap.ServerList))
-	copy(rv, b.VBucketServerMap.ServerList)
+func (b *Bucket) NodeAddresses() []string {
+	bucketInfo := b.getBucketInfo()
+	rv := make([]string, len(bucketInfo.VBucketServerMap.ServerList))
+	copy(rv, bucketInfo.VBucketServerMap.ServerList)
 	sort.Strings(rv)
 	return rv
 }
 
 // Get the longest common suffix of all host:port strings in the node list.
-func (b Bucket) CommonAddressSuffix() string {
+func (b *Bucket) CommonAddressSuffix() string {
+	bucketInfo := b.getBucketInfo()
 	input := []string{}
-	for _, n := range b.Nodes {
+	for _, n := range bucketInfo.Nodes {
 		input = append(input, n.Hostname)
 	}
 	return FindCommonSuffix(input)
@@ -221,34 +220,49 @@ func Connect(baseU string) (Client, error) {
 	return ConnectWithAuth(baseU, basicAuthFromURL(baseU))
 }
 
+func (b *Bucket) getBucketInfo() bucketInfo {
+	b.bucketInfoMutex.RLock()
+	defer b.bucketInfoMutex.RUnlock()
+	return b.bucketInfo
+}
+
 func (b *Bucket) refresh() (err error) {
-	pool := b.pool
-	err = pool.client.parseURLResponse(b.URI, b)
+	b.bucketInfoMutex.Lock()
+	defer b.bucketInfoMutex.Unlock()
+
+	err = b.pool.client.parseURLResponse(b.bucketInfo.URI, &b.bucketInfo)
 	if err != nil {
 		return err
 	}
-	b.pool = pool
 	for i := range b.connections {
 		b.connections[i] = newConnectionPool(
-			b.VBucketServerMap.ServerList[i],
-			b.authHandler(), PoolSize, PoolOverflow)
+			b.bucketInfo.VBucketServerMap.ServerList[i],
+			b.authHandler, PoolSize, PoolOverflow)
 	}
 	return nil
 }
 
 func (p *Pool) refresh() (err error) {
-	p.BucketMap = make(map[string]Bucket)
+	p.BucketMap = make(map[string]*Bucket)
 
-	buckets := []Bucket{}
+	buckets := []bucketInfo{}
 	err = p.client.parseURLResponse(p.BucketURL["uri"], &buckets)
 	if err != nil {
 		return err
 	}
 	for _, b := range buckets {
-		b.pool = p
-		b.connections = make([]*connectionPool, len(b.VBucketServerMap.ServerList))
+		authHandler := p.client.ah
+		if authHandler == nil {
+			authHandler = &basicAuth{b.Name, ""}
+		}
 
-		p.BucketMap[b.Name] = b
+		bucket := &Bucket{
+			pool:        p,
+			connections: make([]*connectionPool, len(b.VBucketServerMap.ServerList)),
+			authHandler: authHandler,
+			bucketInfo:  b,
+		}
+		p.BucketMap[b.Name] = bucket
 	}
 	return nil
 }
@@ -297,12 +311,12 @@ func (p *Pool) GetBucket(name string) (*Bucket, error) {
 	if !ok {
 		return nil, errors.New("No bucket named " + name)
 	}
-	runtime.SetFinalizer(&rv, bucket_finalizer)
+	runtime.SetFinalizer(rv, bucket_finalizer)
 	err := rv.refresh()
 	if err != nil {
 		return nil, err
 	}
-	return &rv, nil
+	return rv, nil
 }
 
 // Get the pool to which this bucket belongs.

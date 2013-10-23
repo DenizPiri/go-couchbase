@@ -64,7 +64,7 @@ func (feed *TapFeed) run() {
 
 		// On error, try to refresh the bucket in case the list of nodes changed:
 		log.Printf("go-couchbase: TAP connection lost; reconnecting to bucket %q in %v",
-			feed.bucket.Name, retryInterval)
+			feed.bucket.getBucketInfo().Name, retryInterval)
 		err := feed.bucket.refresh()
 		bucketOK = err == nil
 

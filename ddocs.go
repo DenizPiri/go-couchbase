@@ -33,8 +33,10 @@ type DDocsResult struct {
 
 // Get the design documents
 func (b *Bucket) GetDDocs() (DDocsResult, error) {
+	bucketInfo := b.getBucketInfo()
+
 	var ddocsResult DDocsResult
-	err := b.pool.client.parseURLResponse(b.DDocs.URI, &ddocsResult)
+	err := b.pool.client.parseURLResponse(bucketInfo.DDocs.URI, &ddocsResult)
 	if err != nil {
 		return DDocsResult{}, err
 	}
@@ -42,11 +44,13 @@ func (b *Bucket) GetDDocs() (DDocsResult, error) {
 }
 
 func (b *Bucket) ddocURL(docname string) (string, error) {
+	bucketInfo := b.getBucketInfo()
+
 	u, err := b.randomBaseURL()
 	if err != nil {
 		return "", err
 	}
-	u.Path = fmt.Sprintf("/%s/_design/%s", b.Name, docname)
+	u.Path = fmt.Sprintf("/%s/_design/%s", bucketInfo.Name, docname)
 	return u.String(), nil
 }
 
@@ -67,7 +71,7 @@ func (b *Bucket) PutDDoc(docname string, value interface{}) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	maybeAddAuth(req, b.authHandler())
+	maybeAddAuth(req, b.authHandler)
 
 	res, err := HttpClient.Do(req)
 	if err != nil {
@@ -95,7 +99,7 @@ func (b *Bucket) GetDDoc(docname string, into interface{}) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	maybeAddAuth(req, b.authHandler())
+	maybeAddAuth(req, b.authHandler)
 
 	res, err := HttpClient.Do(req)
 	if err != nil {
@@ -124,7 +128,7 @@ func (b *Bucket) DeleteDDoc(docname string) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	maybeAddAuth(req, b.authHandler())
+	maybeAddAuth(req, b.authHandler)
 
 	res, err := HttpClient.Do(req)
 	if err != nil {
