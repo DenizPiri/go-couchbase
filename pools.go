@@ -107,10 +107,18 @@ type Bucket struct {
 	bucketInfo      bucketInfo // Protected by bucketInfoMutex.
 	bucketInfoMutex sync.RWMutex
 
+	connections      []*connectionPool
+	connectionsMutex sync.Mutex
+
 	pool        *Pool
-	connections []*connectionPool
-	commonSufix string
 	authHandler AuthHandler // Read-only and go-routine safe.
+}
+
+// Get connectionPool for the given masterId.
+func (b *Bucket) getConnectionPool(masterId int) *connectionPool {
+	b.connectionsMutex.Lock()
+	defer b.connectionsMutex.Unlock()
+	return b.connections[masterId]
 }
 
 // Get the (sorted) list of memcached node addresses (hostname:port).
@@ -226,20 +234,24 @@ func (b *Bucket) getBucketInfo() bucketInfo {
 	return b.bucketInfo
 }
 
-func (b *Bucket) refresh() (err error) {
-	b.bucketInfoMutex.Lock()
-	defer b.bucketInfoMutex.Unlock()
-
-	err = b.pool.client.parseURLResponse(b.bucketInfo.URI, &b.bucketInfo)
+func (b *Bucket) refresh() (bucketInfo bucketInfo, err error) {
+	err = b.pool.client.parseURLResponse(b.bucketInfo.URI, &bucketInfo)
 	if err != nil {
-		return err
+		return
 	}
+
+	b.bucketInfoMutex.Lock()
+	b.bucketInfo = bucketInfo
+	b.bucketInfoMutex.Unlock()
+
+	b.connectionsMutex.Lock()
+	defer b.connectionsMutex.Unlock()
 	for i := range b.connections {
 		b.connections[i] = newConnectionPool(
-			b.bucketInfo.VBucketServerMap.ServerList[i],
+			bucketInfo.VBucketServerMap.ServerList[i],
 			b.authHandler, PoolSize, PoolOverflow)
 	}
-	return nil
+	return
 }
 
 func (p *Pool) refresh() (err error) {
@@ -289,6 +301,9 @@ func (c *Client) GetPool(name string) (p Pool, err error) {
 
 // Mark this bucket as no longer needed, closing connections it may have open.
 func (b *Bucket) Close() {
+	b.connectionsMutex.Lock()
+	defer b.connectionsMutex.Unlock()
+
 	if b.connections != nil {
 		for _, c := range b.connections {
 			if c != nil {
@@ -300,6 +315,9 @@ func (b *Bucket) Close() {
 }
 
 func bucket_finalizer(b *Bucket) {
+	b.connectionsMutex.Lock()
+	defer b.connectionsMutex.Unlock()
+
 	if b.connections != nil {
 		log.Printf("Warning: Finalizing a bucket with active connections.")
 	}
@@ -312,7 +330,7 @@ func (p *Pool) GetBucket(name string) (*Bucket, error) {
 		return nil, errors.New("No bucket named " + name)
 	}
 	runtime.SetFinalizer(rv, bucket_finalizer)
-	err := rv.refresh()
+	_, err := rv.refresh()
 	if err != nil {
 		return nil, err
 	}

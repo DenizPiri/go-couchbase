@@ -46,6 +46,7 @@ func (b *Bucket) StartTapFeed(args *memcached.TapArguments) (*TapFeed, error) {
 func (feed *TapFeed) run() {
 	retryInterval := kInitialRetryInterval
 	bucketOK := true
+	bucketInfo := feed.bucket.getBucketInfo()
 	for {
 		// Connect to the TAP feed of each server node:
 		if bucketOK {
@@ -64,8 +65,9 @@ func (feed *TapFeed) run() {
 
 		// On error, try to refresh the bucket in case the list of nodes changed:
 		log.Printf("go-couchbase: TAP connection lost; reconnecting to bucket %q in %v",
-			feed.bucket.getBucketInfo().Name, retryInterval)
-		err := feed.bucket.refresh()
+			bucketInfo.Name, retryInterval)
+		var err error
+		bucketInfo, err = feed.bucket.refresh()
 		bucketOK = err == nil
 
 		select {

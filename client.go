@@ -53,13 +53,15 @@ var ErrMaxRetries = errors.New("Exceeded max retries")
 // your function on a "not-my-vbucket" error, so don't assume
 // your command will only be executed only once.
 func (b *Bucket) Do(k string, f func(mc *memcached.Client, vb uint16) error) error {
+	bucketInfo := b.getBucketInfo()
+
 	for attempts := 0; attempts < MaxRetries; attempts++ {
-		bucketInfo := b.getBucketInfo()
 		vb := vbHash(bucketInfo, k)
 
 		masterId := bucketInfo.VBucketServerMap.VBucketMap[vb][0]
-		conn, err := b.connections[masterId].Get()
-		defer b.connections[masterId].Return(conn)
+		connectionPool := b.getConnectionPool(masterId)
+		conn, err := connectionPool.Get() // These are nil-safe
+		defer connectionPool.Return(conn)
 		if err != nil {
 			return err
 		}
@@ -76,7 +78,7 @@ func (b *Bucket) Do(k string, f func(mc *memcached.Client, vb uint16) error) err
 			}
 		}
 
-		b.refresh()
+		bucketInfo, _ = b.refresh()
 	}
 	return ErrMaxRetries
 }
@@ -92,8 +94,9 @@ func getStatsParallel(b *Bucket, offset int, which string,
 	sn := bucketInfo.VBucketServerMap.ServerList[offset]
 
 	results := map[string]string{}
-	conn, err := b.connections[offset].Get()
-	defer b.connections[offset].Return(conn)
+	connectionPool := b.getConnectionPool(offset)
+	conn, err := connectionPool.Get()
+	defer connectionPool.Return(conn)
 	if err != nil {
 		ch <- gathered_stats{sn, results}
 	} else {
@@ -160,12 +163,13 @@ func (b *Bucket) doBulkGet(vb uint16, keys []string,
 		// This stack frame exists to ensure we can clean up
 		// connection at a reasonable time.
 		err := func() error {
-			conn, err := b.connections[masterId].Get()
+			connectionPool := b.getConnectionPool(masterId)
+			conn, err := connectionPool.Get()
 			if err != nil {
 				ch <- map[string]*gomemcached.MCResponse{}
 				return err
 			}
-			defer b.connections[masterId].Return(conn)
+			defer connectionPool.Return(conn)
 
 			m, err := conn.GetBulk(vb, keys)
 			switch err.(type) {
