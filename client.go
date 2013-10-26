@@ -41,6 +41,11 @@ import (
 // Maximum number of times to retry a chunk of a bulk get on error.
 var MaxBulkRetries = 10
 
+// Determines the time between each topology rediscovery attempt when the
+// client is getting not memcached related errors from gomemcached.
+// This happens when a node is failed-over.
+var TimeoutErrorRetry = 3 * time.Second
+
 // Execute a function on a memcached connection to the node owning key "k"
 //
 // Note that this automatically handles transient errors by replaying
@@ -53,17 +58,33 @@ func (b *Bucket) Do(k string, f func(mc *memcached.Client, vb uint16) error) err
 		// We encapsulate the attempt within an anonymous function to allow
 		// "defer" statement to work as intended.
 		retry, err := func() (retry bool, err error) {
+			checkShouldRetry := func() bool {
+				select {
+				default:
+					return false
+				case <-b.errorRefreshTicker.C:
+					return true
+				}
+			}
+
 			vbm := b.VBServerMap()
 			masterId := vbm.VBucketMap[vb][0]
 			pool := b.getConnPool(masterId)
 			conn, err := pool.Get()
 			defer pool.Return(conn)
 			if err != nil {
+				if err != TimeoutError && err != closedPool {
+					retry = retry || checkShouldRetry()
+				}
 				return
 			}
 
 			err = f(conn, uint16(vb))
 			switch i := err.(type) {
+			default:
+				if err != nil {
+					retry = retry || checkShouldRetry()
+				}
 			case *gomemcached.MCResponse:
 				st := i.Status
 				atomic.AddUint64(&b.pool.client.Statuses[st], 1)

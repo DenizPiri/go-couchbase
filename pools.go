@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 	"unsafe"
 )
 
@@ -109,11 +110,13 @@ type Bucket struct {
 	VBSMJson  VBucketServerMap `json:"vBucketServerMap"`
 	NodesJson []Node           `json:"nodes"`
 
-	pool             *Pool
+	pool               *Pool
+	errorRefreshTicker *time.Ticker
+	commonSufix        string
+
 	connPools        unsafe.Pointer // *[]*connectionPool
 	vBucketServerMap unsafe.Pointer // *VBucketServerMap
 	nodeList         unsafe.Pointer // *[]Node
-	commonSufix      string
 }
 
 // Get the current vbucket server map
@@ -335,6 +338,15 @@ func (p *Pool) refresh() (err error) {
 		b.pool = p
 		b.nodeList = unsafe.Pointer(&b.NodesJson)
 		b.replaceConnPools(make([]*connectionPool, len(b.VBSMJson.ServerList)))
+		b.errorRefreshTicker = time.NewTicker(TimeoutErrorRetry)
+
+		runtime.SetFinalizer(&b, func(b *Bucket) {
+			b.errorRefreshTicker.Stop()
+
+			if b.connPools != nil {
+				log.Printf("Warning: Finalizing a bucket with active connections.")
+			}
+		})
 
 		p.BucketMap[b.Name] = b
 	}
@@ -373,19 +385,12 @@ func (b *Bucket) Close() {
 	}
 }
 
-func bucket_finalizer(b *Bucket) {
-	if b.connPools != nil {
-		log.Printf("Warning: Finalizing a bucket with active connections.")
-	}
-}
-
 // Get a bucket from within this pool.
 func (p *Pool) GetBucket(name string) (*Bucket, error) {
 	rv, ok := p.BucketMap[name]
 	if !ok {
 		return nil, errors.New("No bucket named " + name)
 	}
-	runtime.SetFinalizer(&rv, bucket_finalizer)
 	err := rv.refresh()
 	if err != nil {
 		return nil, err
