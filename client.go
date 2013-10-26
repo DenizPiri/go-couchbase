@@ -54,31 +54,37 @@ var ErrMaxRetries = errors.New("Exceeded max retries")
 // your command will only be executed only once.
 func (b *Bucket) Do(k string, f func(mc *memcached.Client, vb uint16) error) error {
 	bucketInfo := b.getBucketInfo()
+	vb := vbHash(bucketInfo, k)
 
 	for attempts := 0; attempts < MaxRetries; attempts++ {
-		vb := vbHash(bucketInfo, k)
-
-		masterId := bucketInfo.VBucketServerMap.VBucketMap[vb][0]
-		connectionPool := b.getConnectionPool(masterId)
-		conn, err := connectionPool.Get() // These are nil-safe
-		defer connectionPool.Return(conn)
-		if err != nil {
-			return err
-		}
-
-		err = f(conn, uint16(vb))
-		switch err.(type) {
-		default:
-			return err
-		case *gomemcached.MCResponse:
-			st := err.(*gomemcached.MCResponse).Status
-			atomic.AddUint64(&b.pool.client.Statuses[st], 1)
-			if st != gomemcached.NOT_MY_VBUCKET {
-				return err
+		// We encapsulate the attempt within a function to allow "defer"
+		// statement to work as intended.
+		retry, err := func() (retry bool, err error) {
+			masterId := bucketInfo.VBucketServerMap.VBucketMap[vb][0]
+			connectionPool := b.getConnectionPool(masterId)
+			conn, err := connectionPool.Get() // These are nil-safe
+			defer connectionPool.Return(conn)
+			if err != nil {
+				return
 			}
-		}
 
-		bucketInfo, _ = b.refresh()
+			err = f(conn, uint16(vb))
+			switch err.(type) {
+			case *gomemcached.MCResponse:
+				st := err.(*gomemcached.MCResponse).Status
+				atomic.AddUint64(&b.pool.client.Statuses[st], 1)
+				if st == gomemcached.NOT_MY_VBUCKET {
+					retry = true
+				}
+			}
+			return
+		}()
+
+		if retry {
+			bucketInfo, _ = b.refresh()
+		} else {
+			return err
+		}
 	}
 	return ErrMaxRetries
 }
